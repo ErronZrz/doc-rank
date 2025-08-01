@@ -1,0 +1,14 @@
+# Go
+bin/
+*.exe
+*.log
+*.out
+*.test
+coverage/
+
+# Dependency directories
+vendor/
+
+# IDEs
+.idea/
+.vscode/
