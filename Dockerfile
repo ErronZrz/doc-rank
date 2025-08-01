@@ -4,6 +4,7 @@ FROM golang:1.24 AS builder
 WORKDIR /app
 COPY go.mod ./
 COPY . .
+RUN go mod download
 RUN go build -o server ./cmd/main.go
 
 # Run stage
