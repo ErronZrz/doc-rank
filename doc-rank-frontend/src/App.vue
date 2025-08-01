@@ -2,18 +2,55 @@
   <main class="p-6 bg-gray-100 min-h-screen">
     <h1 class="text-3xl font-bold text-blue-600 mb-6">📊 文档点击排行榜</h1>
 
+    <!-- 文档新增/编辑表单 -->
+    <div class="mb-4 flex flex-wrap items-center gap-2">
+      <input v-model="newDoc.id" placeholder="ID" :disabled="editingId !== null"
+        class="border px-2 py-1 rounded w-28" />
+      <input v-model="newDoc.title" placeholder="标题"
+        class="border px-2 py-1 rounded w-40" />
+      <input v-model="newDoc.url" placeholder="URL（可选）"
+        class="border px-2 py-1 rounded w-48" />
+
+      <button
+          @click="saveDoc"
+          class="px-3 py-1 bg-green-500 hover:bg-green-600 text-white rounded"
+      >
+        {{ editingId ? '💾 保存修改' : '➕ 添加文档' }}
+      </button>
+
+      <button
+          v-if="editingId"
+          @click="cancelEdit"
+          class="px-3 py-1 bg-gray-300 hover:bg-gray-400 text-black rounded"
+      >
+        取消编辑
+      </button>
+    </div>
+
     <!-- 文档点击列表 -->
     <section class="mb-8">
-      <h2 class="text-xl font-semibold mb-2">📁 可点击文档</h2>
+      <h2 class="text-xl font-semibold mb-2">📁 已添加文档</h2>
       <div class="flex flex-wrap gap-4">
-        <button
-            v-for="doc in documents"
-            :key="doc.id"
-            @click="clickDoc(doc.id)"
-            class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg shadow"
-        >
-          {{ doc.title }}
-        </button>
+        <div v-for="doc in documents" :key="doc.id" class="flex items-center gap-2">
+          <button
+              @click="clickDoc(doc.id)"
+              class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded shadow"
+          >
+            {{ doc.title }}
+          </button>
+
+          <button
+              @click="editDoc(doc)"
+              class="text-yellow-500 hover:text-yellow-700"
+              title="编辑"
+          >✏️</button>
+
+          <button
+              @click="deleteDoc(doc.id)"
+              class="text-red-500 hover:text-red-700"
+              title="删除"
+          >🗑️</button>
+        </div>
       </div>
     </section>
 
@@ -55,12 +92,18 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 
-// 可点击的文档（固定）
-const documents = [
-  { id: 'a', title: '文档 A' },
-  { id: 'b', title: '文档 B' },
-  { id: 'c', title: '文档 C' },
-]
+// 使用实时查询的文档列表
+const documents = ref([])
+
+async function loadDocuments() {
+  try {
+    const res = await fetch('http://localhost:8080/docs')
+    const data = await res.json()
+    documents.value = data.documents || []
+  } catch (err) {
+    console.error('加载文档失败:', err)
+  }
+}
 
 const totalRank = ref([])
 const recentRank = ref([])
@@ -93,11 +136,67 @@ async function clickDoc(docID) {
 
 // 获取文档标题
 function getTitle(docID) {
-  const doc = documents.find(d => d.id === docID)
+  const doc = documents.value.find(d => d.id === docID)
   return doc ? doc.title : docID
 }
 
+// 提供文件的增删改功能
+
+// 增与改
+const newDoc = ref({ id: '', title: '', url: '' })
+const editingId = ref(null) // 用于编辑文档
+
+async function saveDoc() {
+  const body = { ...newDoc.value }
+
+  if (!body.id || !body.title) {
+    alert('ID 和标题不能为空')
+    return
+  }
+
+  try {
+    const res = await fetch('http://localhost:8080/docs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (res.ok) {
+      newDoc.value = { id: '', title: '', url: '' }
+      editingId.value = null
+      await loadDocuments()
+    }
+  } catch (err) {
+    console.error('保存失败:', err)
+  }
+}
+
+function editDoc(doc) {
+  newDoc.value = { ...doc }
+  editingId.value = doc.id
+}
+
+function cancelEdit() {
+  newDoc.value = { id: '', title: '', url: '' }
+  editingId.value = null
+}
+
+// 删
+async function deleteDoc(id) {
+  if (!confirm(`确认删除文档 ${id} 吗？`)) return
+  try {
+    const res = await fetch(`http://localhost:8080/docs/${id}`, {
+      method: 'DELETE',
+    })
+    if (res.ok) {
+      await loadDocuments()
+    }
+  } catch (err) {
+    console.error('删除失败:', err)
+  }
+}
+
 onMounted(() => {
+  loadDocuments()
   loadRankings()
 
   const source = new EventSource('http://localhost:8080/events')

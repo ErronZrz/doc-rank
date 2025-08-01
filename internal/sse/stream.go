@@ -5,7 +5,7 @@ import (
 	"io"
 )
 
-func SSEHandler(c *gin.Context) {
+func ServerSentEventHandler(c *gin.Context) {
 	client := Subscribe()
 	defer Unsubscribe(client)
 

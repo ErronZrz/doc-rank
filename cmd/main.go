@@ -29,7 +29,11 @@ func main() {
 
 	r.GET("/rank/total", handlers.TotalRankingHandler)
 	r.GET("/rank/recent", handlers.RecentRankingHandler)
-	r.GET("/events", sse.SSEHandler)
+	r.GET("/events", sse.ServerSentEventHandler)
+
+	r.GET("/docs", handlers.ListDocuments)
+	r.POST("/docs", handlers.SaveDocument)         // 新增或更新
+	r.DELETE("/docs/:id", handlers.DeleteDocument) // 删除
 
 	log.Printf("Server is running at http://localhost:%s", cfg.Port)
 	if err := r.Run(fmt.Sprintf(":%s", cfg.Port)); err != nil {
