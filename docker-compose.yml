@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7.2
+    container_name: redis-doc-rank
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "/data/redis.conf"]
+    networks:
+      app-net:
+        aliases:
+          - redis
+
+  backend:
+    build: .
+    container_name: doc-rank-backend
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    networks:
+      - app-net
+
+  frontend:
+    build:
+      context: ./doc-rank-frontend
+    container_name: doc-rank-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - app-net
+
+volumes:
+  redis_data:
+
+networks:
+  app-net:
+    driver: bridge
