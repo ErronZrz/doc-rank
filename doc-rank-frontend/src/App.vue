@@ -137,7 +137,7 @@ async function clickDoc(docID) {
 // 获取文档标题
 function getTitle(docID) {
   const doc = documents.value.find(d => d.id === docID)
-  return doc ? doc.title : docID
+  return doc ? doc.title : `新文档 (${docID})`
 }
 
 // 提供文件的增删改功能
@@ -200,11 +200,13 @@ onMounted(() => {
   loadRankings()
 
   const source = new EventSource('http://localhost:8080/events')
-  source.addEventListener('ranking_update', (event) => {
+  source.addEventListener('update', async (event) => {
     try {
       const data = JSON.parse(event.data)
-      totalRank.value = data.total_rank || []
-      recentRank.value = data.recent_rank || []
+      if (data.type === 'update_all') {
+        await loadDocuments()
+        await loadRankings()
+      }
     } catch (err) {
       console.error('解析 SSE 数据失败:', err)
     }

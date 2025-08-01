@@ -17,7 +17,7 @@ func ServerSentEventHandler(c *gin.Context) {
 	c.Stream(func(w io.Writer) bool {
 		if msg, ok := <-client; ok {
 			// 事件名可自定义
-			c.SSEvent("ranking_update", string(msg))
+			c.SSEvent("update", string(msg))
 			return true
 		}
 		return false

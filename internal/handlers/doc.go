@@ -53,6 +53,9 @@ func SaveDocument(c *gin.Context) {
 		return
 	}
 
+	// 重新推送排行榜（不需要等 click 触发）
+	go broadcastUpdateSignal()
+
 	c.JSON(http.StatusOK, gin.H{"message": "Saved"})
 }
 
@@ -69,7 +72,7 @@ func DeleteDocument(c *gin.Context) {
 		fmt.Sprintf("doc_click_timeline:%s", docID),
 	}
 
-	// 删除 ZSET 中的 doc_id 元素
+	// 删除总榜中的 doc_id 元素
 	if err := redis.Client.ZRem(redis.Ctx, "doc_click_total", docID).Err(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "ZREM failed"})
 		return
@@ -80,6 +83,9 @@ func DeleteDocument(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "DEL failed"})
 		return
 	}
+
+	// 重新推送排行榜（不需要等 click 触发）
+	go broadcastUpdateSignal()
 
 	c.JSON(http.StatusOK, gin.H{"message": "Deleted"})
 }
