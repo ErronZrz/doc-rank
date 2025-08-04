@@ -94,10 +94,11 @@ import { ref, onMounted } from 'vue'
 
 // 使用实时查询的文档列表
 const documents = ref([])
+const apiBaseUrl = import.meta.env.VITE_API_BASE_URL
 
 async function loadDocuments() {
   try {
-    const res = await fetch('http://localhost:8080/docs')
+    const res = await fetch(`${apiBaseUrl}/docs`)
     const data = await res.json()
     documents.value = data.documents || []
   } catch (err) {
@@ -111,8 +112,8 @@ const recentRank = ref([])
 async function loadRankings() {
   try {
     const [totalRes, recentRes] = await Promise.all([
-      fetch('http://localhost:8080/rank/total').then(res => res.json()),
-      fetch('http://localhost:8080/rank/recent').then(res => res.json()),
+      fetch(`${apiBaseUrl}/rank/total`).then(res => res.json()),
+      fetch(`${apiBaseUrl}/rank/recent`).then(res => res.json()),
     ])
     totalRank.value = totalRes.rank || []
     recentRank.value = recentRes.rank || []
@@ -124,7 +125,7 @@ async function loadRankings() {
 // 点击文档
 async function clickDoc(docID) {
   try {
-    await fetch('http://localhost:8080/click', {
+    await fetch(`${apiBaseUrl}/click`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ doc_id: docID }),
@@ -155,7 +156,7 @@ async function saveDoc() {
   }
 
   try {
-    const res = await fetch('http://localhost:8080/docs', {
+    const res = await fetch(`${apiBaseUrl}/docs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -184,7 +185,7 @@ function cancelEdit() {
 async function deleteDoc(id) {
   if (!confirm(`确认删除文档 ${id} 吗？`)) return
   try {
-    const res = await fetch(`http://localhost:8080/docs/${id}`, {
+    const res = await fetch(`${apiBaseUrl}/docs/${id}`, {
       method: 'DELETE',
     })
     if (res.ok) {
@@ -199,7 +200,7 @@ onMounted(() => {
   loadDocuments()
   loadRankings()
 
-  const source = new EventSource('http://localhost:8080/events')
+  const source = new EventSource(`${apiBaseUrl}/events`)
   source.addEventListener('update', async (event) => {
     try {
       const data = JSON.parse(event.data)
