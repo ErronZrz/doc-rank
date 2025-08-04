@@ -33,7 +33,7 @@ services:
     build:
       context: ./doc-rank-frontend
       args:
-        - VITE_API_BASE_URL=http://backend:8080
+        - VITE_API_BASE_URL=/api
     container_name: doc-rank-frontend
     restart: unless-stopped
     ports:
