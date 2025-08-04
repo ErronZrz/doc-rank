@@ -9,7 +9,8 @@ services:
       - "6379:6379"
     volumes:
       - ./redis_data:/data
-    command: ["redis-server", "/data/redis.conf"]
+      - ./redis_config/redis.conf:/usr/local/etc/redis/redis.conf
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
     networks:
       app-net:
         aliases:

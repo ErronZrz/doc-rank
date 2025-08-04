@@ -8,7 +8,7 @@ RUN go mod download
 RUN go build -o server ./cmd/main.go
 
 # Run stage
-FROM gcr.io/distroless/base-debian11
+FROM gcr.io/distroless/base-debian12
 WORKDIR /app
 COPY --from=builder /app/server .
 COPY .env .
