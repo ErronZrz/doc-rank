@@ -1,42 +1,38 @@
 package main
 
 import (
-	"fmt"
-	"github.com/ErronZrz/doc-rank/config"
-	"github.com/ErronZrz/doc-rank/internal/handlers"
-	"github.com/ErronZrz/doc-rank/internal/redis"
-	"github.com/ErronZrz/doc-rank/internal/sse"
-	"github.com/gin-contrib/cors"
-	"log"
+	"context"
 
-	"github.com/gin-gonic/gin"
+	"github.com/ErronZrz/doc-rank/internal/api/handlers"
+	"github.com/ErronZrz/doc-rank/internal/api/sse"
+	"github.com/ErronZrz/doc-rank/internal/app"
 )
 
 func main() {
-	cfg := config.Load()
-	redis.InitRedis(cfg)
-
-	r := gin.Default()
-
-	// 启用 CORS
-	r.Use(cors.Default())
-
-	r.GET("/ping", func(c *gin.Context) {
-		c.JSON(200, gin.H{"message": "pong"})
+	// 伪示例：根据你的 cfg 构建 app
+	aw, _ := app.NewApp(app.WiringConfig{
+		RecentWindowSeconds: cfg.RecentWindowSeconds,
+		SSEPushInterval:     cfg.SSEPushInterval,
+		SSETopK:             cfg.SSETopK,
+		WALPath:             cfg.WALPath,
+		WALGroupEvery:       cfg.WALGroupCommitEvery,
+		WALBatch:            cfg.WALGroupBatch,
+		SnapshotPath:        cfg.SnapshotPath,
+		SnapshotInterval:    cfg.SnapshotInterval,
 	})
+	_ = aw.Start(context.Background())
+	defer aw.Shutdown(context.Background())
 
-	r.POST("/click", handlers.ClickHandler)
+	handlers := &handlers.RankHandlerDeps{State: aw.State}
+	clicks := &handlers.ClickHandlerDeps{State: aw.State, WAL: aw.WAL}
+	docs := &handlers.DocsHandlerDeps{State: aw.State, WAL: aw.WAL}
 
-	r.GET("/rank/total", handlers.TotalRankingHandler)
+	r.POST("/click", clicks.ClickHandler)
+	r.GET("/rank/total", handlers.TotalRankingHandler) // 注意：此处应使用 handlers 变量名不同避免覆盖
 	r.GET("/rank/recent", handlers.RecentRankingHandler)
-	r.GET("/events", sse.ServerSentEventHandler)
+	r.GET("/events", sse.ServerSentEventHandler(aw.SSEHub))
 
-	r.GET("/docs", handlers.ListDocuments)
-	r.POST("/docs", handlers.SaveDocument)         // 新增或更新
-	r.DELETE("/docs/:id", handlers.DeleteDocument) // 删除
-
-	log.Printf("Server is running at http://localhost:%s", cfg.Port)
-	if err := r.Run(fmt.Sprintf(":%s", cfg.Port)); err != nil {
-		log.Fatalf("Server start failed: %v", err)
-	}
+	r.GET("/docs", docs.ListDocuments)
+	r.POST("/docs", docs.SaveDocument)
+	r.DELETE("/docs/:id", docs.DeleteDocument)
 }
