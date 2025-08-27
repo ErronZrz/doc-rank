@@ -133,6 +133,7 @@ func (b *Buckets) Adjust(id string, delta int) int {
 
 	// 从旧桶移除并插入到新桶头
 	oldB := e.b
+	oldPrev := oldB.prev
 	b.removeEntryFromBucket(oldB, e)
 	e.count = newCount
 	b.insertEntryToBucketHead(nb, e)
@@ -141,6 +142,14 @@ func (b *Buckets) Adjust(id string, delta int) int {
 	// 更新 maxB
 	if b.maxB == nil || nb.count > b.maxB.count {
 		b.maxB = nb
+	}
+	// 若旧的 max 桶被移空且是当前 maxB，则回退到前一个非空桶
+	if oldB == b.maxB && oldB.size == 0 {
+		if oldPrev != nil {
+			b.maxB = oldPrev
+		} else {
+			b.maxB = b.zeroB
+		}
 	}
 	return newCount
 }
@@ -191,14 +200,4 @@ func (b *Buckets) removeEntryFromBucket(bb *bucket, e *entry) {
 	}
 	e.prev, e.next = nil, nil
 	bb.size--
-	// 若桶空且不是 0 桶，可从链条中摘除（减少链长度）
-	if bb.size == 0 && bb != b.zeroB {
-		if bb.prev != nil {
-			bb.prev.next = bb.next
-		}
-		if bb.next != nil {
-			bb.next.prev = bb.prev
-		}
-		bb.prev, bb.next = nil, nil
-	}
 }

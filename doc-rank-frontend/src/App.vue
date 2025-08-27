@@ -94,7 +94,7 @@ import { ref, onMounted } from 'vue'
 
 // 使用实时查询的文档列表
 const documents = ref([])
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL
+const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || '/api'
 
 async function loadDocuments() {
   try {

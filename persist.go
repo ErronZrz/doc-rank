@@ -199,19 +199,18 @@ func (p *Persist) SaveSnapshot(docs []Doc, counts map[string]int) error {
 }
 
 type RestoreState struct {
-	Docs   []Doc
-	Counts map[string]int
-	Seq    uint64
-	// 用于恢复“近 10 分钟”的 CLICK 片段（已在 SaveSnapshot 中保证只保留近窗）
+	Docs         []Doc
+	Counts       map[string]int
+	Seq          uint64
 	RecentClicks []walEntry
 }
 
 // Restore 读取 snapshot + 回放 WAL（WAL 中只保留了近 600 秒的 CLICK）
 func (p *Persist) Restore() (*RestoreState, error) {
-	state := &RestoreState{
-		Counts:       make(map[string]int, 1024),
-		RecentClicks: make([]walEntry, 0, 4096),
-	}
+    state := &RestoreState{
+        Counts:       make(map[string]int, 1024),
+        RecentClicks: make([]walEntry, 0, 4096),
+    }
 	// 1) 读快照
 	if f, err := os.Open(p.snapPath); err == nil {
 		defer f.Close()
@@ -223,40 +222,45 @@ func (p *Persist) Restore() (*RestoreState, error) {
 		}
 	}
 	// 2) 读 WAL（保留的只有近 600 秒 CLICK）
-	wf, err := os.Open(p.walPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			p.seq = state.Seq
-			return state, nil
-		}
-		return nil, err
-	}
-	defer wf.Close()
+    wf, err := os.Open(p.walPath)
+    if err != nil {
+        if errors.Is(err, os.ErrNotExist) {
+            p.seq = state.Seq
+            return state, nil
+        }
+        return nil, err
+    }
+    defer wf.Close()
 
-	reader := bufio.NewReader(wf)
-	for {
-		line, err := reader.ReadBytes('\n')
-		if len(line) > 0 {
-			var e walEntry
-			if err := json.Unmarshal(line, &e); err == nil {
-				// 只需要 CLICK；ADD/DEL/UPDATE 已包含在快照
-				if e.Op == "CLICK" {
-					state.RecentClicks = append(state.RecentClicks, e)
-				}
-				if e.Seq > state.Seq {
-					state.Seq = e.Seq
-				}
-			}
-		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return nil, err
-		}
-	}
-	p.seq = state.Seq
-	return state, nil
+    cutoff := time.Now().Add(-600 * time.Second).Unix()
+    nowSec := time.Now().Unix()
+
+    reader := bufio.NewReader(wf)
+    for {
+        line, err := reader.ReadBytes('\n')
+        if len(line) > 0 {
+            var e walEntry
+            if err := json.Unmarshal(line, &e); err == nil {
+                if e.Op == "CLICK" {
+                    // 只保留近 600 秒内 & 非未来的记录
+                    if e.Ts >= cutoff && e.Ts <= nowSec {
+                        state.RecentClicks = append(state.RecentClicks, e)
+                    }
+                }
+                if e.Seq > state.Seq {
+                    state.Seq = e.Seq
+                }
+            }
+        }
+        if err != nil {
+            if errors.Is(err, io.EOF) {
+                break
+            }
+            return nil, err
+        }
+    }
+    p.seq = state.Seq
+    return state, nil
 }
 
 func (p *Persist) NextSeq() uint64 {

@@ -29,12 +29,6 @@ type UpsertDocReq struct {
 	URL   string `json:"url"`
 }
 
-// SSE 消息结构（简单统一）
-type SSEMessage struct {
-	Type string      `json:"type"`
-	Data interface{} `json:"data"`
-}
-
 // WAL 条目（用于持久化）
 type walEntry struct {
 	Seq   uint64 `json:"seq"`

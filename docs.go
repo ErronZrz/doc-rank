@@ -1,5 +1,7 @@
 package main
 
+import "sort"
+
 type Docs struct {
 	m map[string]Doc
 }
@@ -26,5 +28,9 @@ func (d *Docs) List() []Doc {
 	for _, v := range d.m {
 		out = append(out, v)
 	}
+	// 排序：按 ID 升序
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].ID < out[j].ID
+	})
 	return out
 }
