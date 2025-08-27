@@ -45,9 +45,17 @@ func SetupRouter(store *Store, sse *SSEHub, cfg Config) *gin.Engine {
 		c.JSON(http.StatusOK, RankResp{Rank: top})
 	})
 
-	// 近 10 分钟排行榜（占位）
+	// 近 10 分钟排行榜
 	r.GET("/rank/recent", func(c *gin.Context) {
-		c.JSON(http.StatusOK, RankResp{Rank: []RankItem{}})
+		limitStr := c.Query("limit")
+		limit := cfg.TopKDefault
+		if limitStr != "" {
+			if v, err := strconv.Atoi(limitStr); err == nil && v > 0 {
+				limit = v
+			}
+		}
+		top := store.TopKRecent(limit)
+		c.JSON(http.StatusOK, RankResp{Rank: top})
 	})
 
 	// 文档列表

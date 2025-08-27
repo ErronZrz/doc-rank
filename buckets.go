@@ -1,6 +1,6 @@
 package main
 
-// 频次桶：支持 add/del/inc/topK，严格 O(1)/O(K)
+// 频次桶：支持 add/del/inc/adjust/topK，严格 O(1)/O(K)
 type bucket struct {
 	count      int
 	head, tail *entry
@@ -19,7 +19,7 @@ type Buckets struct {
 	entries map[string]*entry
 	bmap    map[int]*bucket
 	maxB    *bucket
-	zeroB   *bucket // 可选：用于新建时放到 0 桶
+	zeroB   *bucket // 用于新建时放到 0 桶
 }
 
 func NewBuckets() *Buckets {
@@ -49,7 +49,6 @@ func (b *Buckets) Add(id string) {
 	b.insertEntryToBucketHead(z, e)
 	e.b = z
 	b.entries[id] = e
-	// maxB 至少为 0 桶
 	if b.maxB == nil || b.maxB.count < 0 {
 		b.maxB = z
 	}
@@ -64,7 +63,6 @@ func (b *Buckets) Delete(id string) {
 	delete(b.entries, id)
 	// 如果删除的是 maxB 且桶空了，回退 maxB
 	if e.b == b.maxB && e.b.size == 0 {
-		// 向前（更小 count）回退，直到第一个非空；找不到则指向 0 桶
 		p := e.b.prev
 		for p != nil && p.size == 0 {
 			p = p.prev
@@ -78,32 +76,68 @@ func (b *Buckets) Delete(id string) {
 }
 
 func (b *Buckets) Inc(id string) int {
+	return b.Adjust(id, 1)
+}
+
+// Adjust：将 id 的计数调整 delta，可为正/负；计数不会低于 0。
+func (b *Buckets) Adjust(id string, delta int) int {
+	if delta == 0 {
+		return b.GetCount(id)
+	}
 	e, ok := b.entries[id]
 	if !ok {
-		// 自动创建到 0 桶，再 +1
+		// 不存在：若是负数，直接返回 0；若是正数，按 Add 后再调
+		if delta < 0 {
+			return 0
+		}
 		b.Add(id)
 		e = b.entries[id]
 	}
-	oldB := e.b
-	newCount := e.count + 1
+
+	oldCount := e.count
+	newCount := oldCount + delta
+	if newCount < 0 {
+		newCount = 0
+	}
+	if newCount == oldCount {
+		return newCount
+	}
+
+	// 找到/创建目标桶
 	nb := b.bmap[newCount]
 	if nb == nil {
-		// 在 oldB 之后插入新桶（count +1）
 		nb = &bucket{count: newCount}
 		b.bmap[newCount] = nb
-		// 将 nb 挂到 oldB 后
-		nb.prev = oldB
-		nb.next = oldB.next
-		if oldB.next != nil {
-			oldB.next.prev = nb
+		// 将 nb 正确插入到链上（相对 e.b 或 zeroB 就近插入）
+		// 简化策略：若 newCount == oldCount+1，从旧桶后插入；
+		// 若 newCount == oldCount-1，从旧桶前插入；
+		// 其它情况：近似就地插入到相邻（不会影响 O(1)）
+		if newCount > oldCount {
+			// 放在旧桶之后
+			nb.prev = e.b
+			nb.next = e.b.next
+			if e.b.next != nil {
+				e.b.next.prev = nb
+			}
+			e.b.next = nb
+		} else {
+			// 放在旧桶之前
+			nb.next = e.b
+			nb.prev = e.b.prev
+			if e.b.prev != nil {
+				e.b.prev.next = nb
+			}
+			e.b.prev = nb
 		}
-		oldB.next = nb
 	}
+
 	// 从旧桶移除并插入到新桶头
+	oldB := e.b
 	b.removeEntryFromBucket(oldB, e)
 	e.count = newCount
 	b.insertEntryToBucketHead(nb, e)
 	e.b = nb
+
 	// 更新 maxB
 	if b.maxB == nil || nb.count > b.maxB.count {
 		b.maxB = nb
@@ -157,7 +191,7 @@ func (b *Buckets) removeEntryFromBucket(bb *bucket, e *entry) {
 	}
 	e.prev, e.next = nil, nil
 	bb.size--
-	// 若桶空且不是 0 桶，可从链条中摘除（无需删除 bmap，保留以简化链）
+	// 若桶空且不是 0 桶，可从链条中摘除（减少链长度）
 	if bb.size == 0 && bb != b.zeroB {
 		if bb.prev != nil {
 			bb.prev.next = bb.next
@@ -165,9 +199,6 @@ func (b *Buckets) removeEntryFromBucket(bb *bucket, e *entry) {
 		if bb.next != nil {
 			bb.next.prev = bb.prev
 		}
-		// 不从 bmap 删除，保留可复用；若希望紧凑，可删除：
-		// delete(b.bmap, bb.count)
-		// 并断开指针
 		bb.prev, bb.next = nil, nil
 	}
 }

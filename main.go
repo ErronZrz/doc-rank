@@ -25,12 +25,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("restore error: %v", err)
 	}
-	log.Printf("restored: docs=%d counts=%d seq=%d", len(state.Docs), len(state.Counts), state.Seq)
+	log.Printf("restored: docs=%d counts=%d seq=%d recentClicks=%d",
+		len(state.Docs), len(state.Counts), state.Seq, len(state.RecentClicks))
 
 	// SSE hub + Store
 	sse := NewSSEHub()
 	store := NewStore(p, sse, cfg)
 	store.Load(state)
+
+	// 启动 recent 窗口推进器
+	stopSnap := make(chan struct{})
+	store.StartRecentAdvancer(stopSnap)
 
 	// HTTP
 	router := SetupRouter(store, sse, cfg)
@@ -40,7 +45,6 @@ func main() {
 	}
 
 	// 周期快照
-	stopSnap := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(cfg.SnapshotInterval)
 		defer ticker.Stop()

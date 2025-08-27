@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 type Persist struct {
@@ -22,9 +23,9 @@ type Persist struct {
 }
 
 type snapshotModel struct {
-	Docs   []Doc            `json:"docs"`
-	Counts map[string]int   `json:"counts"`
-	Seq    uint64           `json:"seq"`
+	Docs   []Doc          `json:"docs"`
+	Counts map[string]int `json:"counts"`
+	Seq    uint64         `json:"seq"`
 }
 
 func NewPersist(dir string, syncEveryWrite bool) (*Persist, error) {
@@ -100,12 +101,12 @@ func (p *Persist) Close() error {
 	return p.walFile.Close()
 }
 
-// SaveSnapshot 原子写快照，并截断 WAL（简化：保留 WAL，不截断也可）
+// SaveSnapshot 原子写快照，并**保留近 600 秒**的 CLICK 记录到新 WAL
 func (p *Persist) SaveSnapshot(docs []Doc, counts map[string]int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// 准备模型
+	// 1) 写快照
 	model := snapshotModel{
 		Docs:   docs,
 		Counts: counts,
@@ -133,26 +134,83 @@ func (p *Persist) SaveSnapshot(docs []Doc, counts map[string]int) error {
 		return err
 	}
 
-	// （可选）轮转 WAL：这里简单粗暴地重建 wal 文件
+	// 2) 轮转 WAL：仅保留最近 600 秒内的 CLICK（用于恢复 /rank/recent）
+	cutoff := time.Now().Add(-600 * time.Second).Unix()
+
+	// 关闭旧 wal writer/file
+	if err := p.walBufWriter.Flush(); err != nil {
+		return err
+	}
 	if err := p.walFile.Close(); err != nil {
 		return err
 	}
-	if err := os.Remove(p.walPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+
+	oldPath := p.walPath + ".old"
+	_ = os.Remove(oldPath)
+	// 将当前 wal 重命名为 .old
+	if err := os.Rename(p.walPath, oldPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return p.openWAL()
+
+	// 创建新 wal
+	newFile, err := os.OpenFile(p.walPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	newWriter := bufio.NewWriterSize(newFile, 1<<20)
+
+	// 从 old 复制近 600 秒内的 CLICK
+	if fOld, err := os.Open(oldPath); err == nil {
+		defer fOld.Close()
+		reader := bufio.NewReader(fOld)
+		for {
+			line, err := reader.ReadBytes('\n')
+			if len(line) > 0 {
+				var e walEntry
+				if json.Unmarshal(line, &e) == nil {
+					if e.Op == "CLICK" && e.Ts >= cutoff {
+						if _, err := newWriter.Write(line); err != nil {
+							return err
+						}
+					}
+				}
+			}
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				return err
+			}
+		}
+	}
+
+	if err := newWriter.Flush(); err != nil {
+		return err
+	}
+	if err := newFile.Sync(); err != nil {
+		return err
+	}
+	// 替换 writer/file
+	p.walFile = newFile
+	p.walBufWriter = newWriter
+
+	_ = os.Remove(oldPath)
+	return nil
 }
 
 type RestoreState struct {
 	Docs   []Doc
 	Counts map[string]int
 	Seq    uint64
+	// 用于恢复“近 10 分钟”的 CLICK 片段（已在 SaveSnapshot 中保证只保留近窗）
+	RecentClicks []walEntry
 }
 
-// Restore 读取 snapshot + 回放 WAL
+// Restore 读取 snapshot + 回放 WAL（WAL 中只保留了近 600 秒的 CLICK）
 func (p *Persist) Restore() (*RestoreState, error) {
 	state := &RestoreState{
-		Counts: make(map[string]int, 1024),
+		Counts:       make(map[string]int, 1024),
+		RecentClicks: make([]walEntry, 0, 4096),
 	}
 	// 1) 读快照
 	if f, err := os.Open(p.snapPath); err == nil {
@@ -164,7 +222,7 @@ func (p *Persist) Restore() (*RestoreState, error) {
 			state.Seq = snap.Seq
 		}
 	}
-	// 2) 回放 WAL
+	// 2) 读 WAL（保留的只有近 600 秒 CLICK）
 	wf, err := os.Open(p.walPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -181,40 +239,9 @@ func (p *Persist) Restore() (*RestoreState, error) {
 		if len(line) > 0 {
 			var e walEntry
 			if err := json.Unmarshal(line, &e); err == nil {
-				if e.Seq <= state.Seq {
-					continue // 已包含在快照内
-				}
-				switch e.Op {
-				case "ADD", "UPDATE":
-					// 更新到 docs 列表（去重）
-					found := false
-					for i := range state.Docs {
-						if state.Docs[i].ID == e.ID {
-							state.Docs[i].Title = e.Title
-							state.Docs[i].URL = e.URL
-							found = true
-							break
-						}
-					}
-					if !found {
-						state.Docs = append(state.Docs, Doc{ID: e.ID, Title: e.Title, URL: e.URL})
-					}
-					// 确保有 count 项
-					if _, ok := state.Counts[e.ID]; !ok {
-						state.Counts[e.ID] = 0
-					}
-				case "DEL":
-					// 从 docs 移除
-					dst := state.Docs[:0]
-					for _, d := range state.Docs {
-						if d.ID != e.ID {
-							dst = append(dst, d)
-						}
-					}
-					state.Docs = dst
-					delete(state.Counts, e.ID)
-				case "CLICK":
-					state.Counts[e.ID] = state.Counts[e.ID] + 1
+				// 只需要 CLICK；ADD/DEL/UPDATE 已包含在快照
+				if e.Op == "CLICK" {
+					state.RecentClicks = append(state.RecentClicks, e)
 				}
 				if e.Seq > state.Seq {
 					state.Seq = e.Seq
