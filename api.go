@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// SetupRouter 构建 HTTP 路由
 func SetupRouter(store *Store, sse *SSEHub, cfg Config) *gin.Engine {
 	r := gin.Default()
 
@@ -32,7 +33,24 @@ func SetupRouter(store *Store, sse *SSEHub, cfg Config) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"doc_id": req.DocID, "clicks": n})
 	})
 
-	// 总排行榜
+	// 统一排行榜：同时返回总榜与最近榜
+	r.GET("/rank", func(c *gin.Context) {
+		limitStr := c.Query("limit")
+		limit := cfg.TopKDefault
+		if limitStr != "" {
+			if v, err := strconv.Atoi(limitStr); err == nil && v > 0 {
+				limit = v
+			}
+		}
+		total := store.TopK(limit)
+		recent := store.TopKRecent(limit)
+		c.JSON(http.StatusOK, gin.H{
+			"total":  RankResp{Rank: total},
+			"recent": RankResp{Rank: recent},
+		})
+	})
+
+	// 兼容旧的总排行榜
 	r.GET("/rank/total", func(c *gin.Context) {
 		limitStr := c.Query("limit")
 		limit := cfg.TopKDefault
@@ -45,7 +63,7 @@ func SetupRouter(store *Store, sse *SSEHub, cfg Config) *gin.Engine {
 		c.JSON(http.StatusOK, RankResp{Rank: top})
 	})
 
-	// 近 10 分钟排行榜
+	// 兼容旧的近 10 分钟排行榜
 	r.GET("/rank/recent", func(c *gin.Context) {
 		limitStr := c.Query("limit")
 		limit := cfg.TopKDefault
@@ -63,7 +81,7 @@ func SetupRouter(store *Store, sse *SSEHub, cfg Config) *gin.Engine {
 		c.JSON(http.StatusOK, DocsResp{Documents: store.ListDocs()})
 	})
 
-	// 新增/修改文档
+	// 新增或修改文档
 	r.POST("/docs", func(c *gin.Context) {
 		var req UpsertDocReq
 		if err := c.ShouldBindJSON(&req); err != nil {

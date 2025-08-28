@@ -111,12 +111,10 @@ const recentRank = ref([])
 
 async function loadRankings() {
   try {
-    const [totalRes, recentRes] = await Promise.all([
-      fetch(`${apiBaseUrl}/rank/total`).then(res => res.json()),
-      fetch(`${apiBaseUrl}/rank/recent`).then(res => res.json()),
-    ])
-    totalRank.value = totalRes.rank || []
-    recentRank.value = recentRes.rank || []
+    const res = await fetch(`${apiBaseUrl}/rank`)
+    const data = await res.json()
+    totalRank.value = (data.total && data.total.rank) || []
+    recentRank.value = (data.recent && data.recent.rank) || []
   } catch (err) {
     console.error('获取排行榜失败:', err)
   }
@@ -204,8 +202,9 @@ onMounted(() => {
   source.addEventListener('update', async (event) => {
     try {
       const data = JSON.parse(event.data)
-      if (data.type === 'update_all') {
+      if (data.type === 'update_doc') {
         await loadDocuments()
+      } else if (data.type === 'update_click') {
         await loadRankings()
       }
     } catch (err) {

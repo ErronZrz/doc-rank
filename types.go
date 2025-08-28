@@ -29,12 +29,12 @@ type UpsertDocReq struct {
 	URL   string `json:"url"`
 }
 
-// WAL 条目（用于持久化）
+// walEntry 表示 WAL 条目
 type walEntry struct {
 	Seq   uint64 `json:"seq"`
 	Op    string `json:"op"`           // ADD / UPDATE / DEL / CLICK
 	ID    string `json:"id,omitempty"` // 文档 ID
 	Title string `json:"title,omitempty"`
 	URL   string `json:"url,omitempty"`
-	Ts    int64  `json:"ts,omitempty"` // CLICK 的秒级时间戳（Unix）
+	Ts    int64  `json:"ts,omitempty"` // CLICK 的秒级时间戳 (Unix)
 }

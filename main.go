@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -17,7 +18,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("persist init error: %v", err)
 	}
-	defer p.Close()
+	defer func(p *Persist) {
+		err := p.Close()
+		if err != nil {
+			log.Fatalf("persist close error: %v", err)
+		}
+	}(p)
 	log.Printf("persist ready: %s", p.DebugPaths())
 
 	// 恢复
@@ -28,12 +34,12 @@ func main() {
 	log.Printf("restored: docs=%d counts=%d seq=%d recentClicks=%d",
 		len(state.Docs), len(state.Counts), state.Seq, len(state.RecentClicks))
 
-	// SSE hub + Store
+	// 初始化 SSE 与 Store
 	sse := NewSSEHub()
 	store := NewStore(p, sse, cfg)
 	store.Load(state)
 
-	// 启动 recent 窗口推进器
+	// 启动最近窗口推进器
 	stopSnap := make(chan struct{})
 	store.StartRecentAdvancer(stopSnap)
 
@@ -64,15 +70,15 @@ func main() {
 		}
 	}()
 
-	// 启动 HTTP
+	// 启动 HTTP 服务
 	go func() {
 		log.Printf("listening on :%s", cfg.Port)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("server error: %v", err)
 		}
 	}()
 
-	// 优雅退出
+	// 退出前处理
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt)
 	<-quit
@@ -82,7 +88,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// 最后一拍快照
+	// 最后保存一次快照
 	counts := store.CountsSnapshot()
 	docs := store.ListDocs()
 	if err := p.SaveSnapshot(docs, counts); err != nil {

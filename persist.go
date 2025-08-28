@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -28,6 +29,7 @@ type snapshotModel struct {
 	Seq    uint64         `json:"seq"`
 }
 
+// NewPersist 创建持久化管理器
 func NewPersist(dir string, syncEveryWrite bool) (*Persist, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
@@ -49,15 +51,15 @@ func (p *Persist) openWAL() error {
 		return err
 	}
 	p.walFile = f
-	p.walBufWriter = bufio.NewWriterSize(f, 1<<20) // 1MB buffer
+	p.walBufWriter = bufio.NewWriterSize(f, 1<<20) // 1 MB buffer
 	return nil
 }
 
-// AppendWAL 线程安全
+// AppendWAL 追加一条 WAL 记录 (线程安全)
 func (p *Persist) AppendWAL(e walEntry) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	// 自增 seq
+	// 维护 seq
 	if e.Seq == 0 {
 		p.seq++
 		e.Seq = p.seq
@@ -85,6 +87,7 @@ func (p *Persist) AppendWAL(e walEntry) error {
 	return nil
 }
 
+// Flush 刷新缓冲区并落盘
 func (p *Persist) Flush() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -94,6 +97,7 @@ func (p *Persist) Flush() error {
 	return p.walFile.Sync()
 }
 
+// Close 刷新并关闭 WAL
 func (p *Persist) Close() error {
 	if err := p.Flush(); err != nil {
 		return err
@@ -101,12 +105,12 @@ func (p *Persist) Close() error {
 	return p.walFile.Close()
 }
 
-// SaveSnapshot 原子写快照，并**保留近 600 秒**的 CLICK 记录到新 WAL
+// SaveSnapshot 写入快照并轮转 WAL 保留最近 600 秒点击
 func (p *Persist) SaveSnapshot(docs []Doc, counts map[string]int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// 1) 写快照
+	// 写快照
 	model := snapshotModel{
 		Docs:   docs,
 		Counts: counts,
@@ -134,10 +138,10 @@ func (p *Persist) SaveSnapshot(docs []Doc, counts map[string]int) error {
 		return err
 	}
 
-	// 2) 轮转 WAL：仅保留最近 600 秒内的 CLICK（用于恢复 /rank/recent）
+	// 轮转 WAL，只保留最近 600 秒 CLICK
 	cutoff := time.Now().Add(-600 * time.Second).Unix()
 
-	// 关闭旧 wal writer/file
+	// 关闭旧 writer 和 file
 	if err := p.walBufWriter.Flush(); err != nil {
 		return err
 	}
@@ -147,12 +151,11 @@ func (p *Persist) SaveSnapshot(docs []Doc, counts map[string]int) error {
 
 	oldPath := p.walPath + ".old"
 	_ = os.Remove(oldPath)
-	// 将当前 wal 重命名为 .old
 	if err := os.Rename(p.walPath, oldPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 
-	// 创建新 wal
+	// 创建新 WAL
 	newFile, err := os.OpenFile(p.walPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
@@ -161,7 +164,12 @@ func (p *Persist) SaveSnapshot(docs []Doc, counts map[string]int) error {
 
 	// 从 old 复制近 600 秒内的 CLICK
 	if fOld, err := os.Open(oldPath); err == nil {
-		defer fOld.Close()
+		defer func(fOld *os.File) {
+			err := fOld.Close()
+			if err != nil {
+				log.Fatalf("persist close error: %v", err)
+			}
+		}(fOld)
 		reader := bufio.NewReader(fOld)
 		for {
 			line, err := reader.ReadBytes('\n')
@@ -190,7 +198,6 @@ func (p *Persist) SaveSnapshot(docs []Doc, counts map[string]int) error {
 	if err := newFile.Sync(); err != nil {
 		return err
 	}
-	// 替换 writer/file
 	p.walFile = newFile
 	p.walBufWriter = newWriter
 
@@ -198,6 +205,7 @@ func (p *Persist) SaveSnapshot(docs []Doc, counts map[string]int) error {
 	return nil
 }
 
+// RestoreState 表示恢复用的快照与 WAL 汇总
 type RestoreState struct {
 	Docs         []Doc
 	Counts       map[string]int
@@ -205,15 +213,20 @@ type RestoreState struct {
 	RecentClicks []walEntry
 }
 
-// Restore 读取 snapshot + 回放 WAL（WAL 中只保留了近 600 秒的 CLICK）
+// Restore 读取快照并回放 WAL 最近 600 秒点击
 func (p *Persist) Restore() (*RestoreState, error) {
-    state := &RestoreState{
-        Counts:       make(map[string]int, 1024),
-        RecentClicks: make([]walEntry, 0, 4096),
-    }
-	// 1) 读快照
+	state := &RestoreState{
+		Counts:       make(map[string]int, 1024),
+		RecentClicks: make([]walEntry, 0, 4096),
+	}
+	// 读快照
 	if f, err := os.Open(p.snapPath); err == nil {
-		defer f.Close()
+		defer func(f *os.File) {
+			err := f.Close()
+			if err != nil {
+				log.Fatalf("persist close error: %v", err)
+			}
+		}(f)
 		var snap snapshotModel
 		if err := json.NewDecoder(f).Decode(&snap); err == nil {
 			state.Docs = snap.Docs
@@ -221,48 +234,54 @@ func (p *Persist) Restore() (*RestoreState, error) {
 			state.Seq = snap.Seq
 		}
 	}
-	// 2) 读 WAL（保留的只有近 600 秒 CLICK）
-    wf, err := os.Open(p.walPath)
-    if err != nil {
-        if errors.Is(err, os.ErrNotExist) {
-            p.seq = state.Seq
-            return state, nil
-        }
-        return nil, err
-    }
-    defer wf.Close()
+	// 读 WAL (仅保留近 600 秒 CLICK)
+	wf, err := os.Open(p.walPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			p.seq = state.Seq
+			return state, nil
+		}
+		return nil, err
+	}
+	defer func(wf *os.File) {
+		err := wf.Close()
+		if err != nil {
+			log.Fatalf("persist close error: %v", err)
+		}
+	}(wf)
 
-    cutoff := time.Now().Add(-600 * time.Second).Unix()
-    nowSec := time.Now().Unix()
+	cutoff := time.Now().Add(-600 * time.Second).Unix()
+	nowSec := time.Now().Unix()
 
-    reader := bufio.NewReader(wf)
-    for {
-        line, err := reader.ReadBytes('\n')
-        if len(line) > 0 {
-            var e walEntry
-            if err := json.Unmarshal(line, &e); err == nil {
-                if e.Op == "CLICK" {
-                    // 只保留近 600 秒内 & 非未来的记录
-                    if e.Ts >= cutoff && e.Ts <= nowSec {
-                        state.RecentClicks = append(state.RecentClicks, e)
-                    }
-                }
-                if e.Seq > state.Seq {
-                    state.Seq = e.Seq
-                }
-            }
-        }
-        if err != nil {
-            if errors.Is(err, io.EOF) {
-                break
-            }
-            return nil, err
-        }
-    }
-    p.seq = state.Seq
-    return state, nil
+	reader := bufio.NewReader(wf)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			var e walEntry
+			if err := json.Unmarshal(line, &e); err == nil {
+				if e.Op == "CLICK" {
+					// 仅保留近 600 秒内且非未来
+					if e.Ts >= cutoff && e.Ts <= nowSec {
+						state.RecentClicks = append(state.RecentClicks, e)
+					}
+				}
+				if e.Seq > state.Seq {
+					state.Seq = e.Seq
+				}
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
+	}
+	p.seq = state.Seq
+	return state, nil
 }
 
+// NextSeq 返回下一个序号
 func (p *Persist) NextSeq() uint64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -270,6 +289,7 @@ func (p *Persist) NextSeq() uint64 {
 	return p.seq
 }
 
+// DebugPaths 返回调试路径信息
 func (p *Persist) DebugPaths() string {
 	return fmt.Sprintf("snapshot=%s wal=%s", p.snapPath, p.walPath)
 }

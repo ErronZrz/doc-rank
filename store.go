@@ -17,6 +17,7 @@ type Store struct {
 	lastPush time.Time
 }
 
+// NewStore 创建 Store
 func NewStore(p *Persist, sse *SSEHub, cfg Config) *Store {
 	return &Store{
 		bkt:    NewBuckets(),
@@ -28,47 +29,42 @@ func NewStore(p *Persist, sse *SSEHub, cfg Config) *Store {
 	}
 }
 
-// 恢复：将 snapshot 灌入总榜；再用 WAL（仅近 600 秒 CLICK）恢复 recent
+// Load 从恢复状态装载文档、总榜与最近榜
 func (s *Store) Load(state *RestoreState) {
-    s.mu.Lock()
-    defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-    // --- 总榜恢复（保持不变） ---
-    for _, d := range state.Docs {
-        s.docs.Upsert(d)
-        if _, ok := state.Counts[d.ID]; !ok {
-            state.Counts[d.ID] = 0
-        }
-    }
-    for _, d := range state.Docs {
-        s.bkt.Add(d.ID)
-    }
-    for id, c := range state.Counts {
-        if c > 0 {
-            s.bkt.Adjust(id, c)
-        }
-    }
+	// 文档恢复
+	for _, d := range state.Docs {
+		s.docs.Upsert(d)
+	}
+	// 补齐快照中缺失的文档计数为 0
+	for _, d := range state.Docs {
+		if _, ok := state.Counts[d.ID]; !ok {
+			state.Counts[d.ID] = 0
+		}
+	}
+	// 用快照计数重建总榜
+	s.bkt.ResetFromCounts(state.Counts)
 
-    // --- 最近榜恢复：先确定最早 ts，设置基准，然后回放 ---
-    if len(state.RecentClicks) > 0 {
-        minTs := state.RecentClicks[0].Ts
-        for _, e := range state.RecentClicks {
-            if e.Ts > 0 && e.Ts < minTs {
-                minTs = e.Ts
-            }
-        }
-        // 基准设为“最早一条点击的前一秒”
-        s.recent.SetBase(minTs - 1)
-        for _, e := range state.RecentClicks {
-            if e.Op == "CLICK" && e.ID != "" && e.Ts > 0 {
-                s.recent.AddClick(e.ID, e.Ts)
-            }
-        }
-    }
+	// 最近榜恢复
+	if len(state.RecentClicks) > 0 {
+		minTs := state.RecentClicks[0].Ts
+		for _, e := range state.RecentClicks {
+			if e.Ts > 0 && e.Ts < minTs {
+				minTs = e.Ts
+			}
+		}
+		s.recent.SetBase(minTs - 1)
+		for _, e := range state.RecentClicks {
+			if e.Op == "CLICK" && e.ID != "" && e.Ts > 0 {
+				s.recent.AddClick(e.ID, e.Ts)
+			}
+		}
+	}
 }
 
-
-// Click：写 WAL（带 ts）→ 更新总榜 → 更新 recent
+// Click 记录一次点击并更新排行榜
 func (s *Store) Click(docID string) (int, bool, error) {
 	ts := time.Now().Unix()
 
@@ -78,32 +74,36 @@ func (s *Store) Click(docID string) (int, bool, error) {
 	if _, ok := s.docs.Get(docID); !ok {
 		return 0, false, nil
 	}
-	// WAL：CLICK + ts
+	// 记录 WAL，带时间戳
 	if err := s.p.AppendWAL(walEntry{Op: "CLICK", ID: docID, Ts: ts}); err != nil {
 		return 0, false, err
 	}
 
 	// 总榜 +1
 	newCount := s.bkt.Adjust(docID, +1)
-	// recent +1（按 ts）
+	// 最近榜 +1
 	s.recent.AddClick(docID, ts)
 
+	// 节流后广播点击更新
 	s.maybeBroadcastTopKLocked()
 	return newCount, true, nil
 }
 
+// TopK 返回总榜前 K 项
 func (s *Store) TopK(k int) []RankItem {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.bkt.TopK(k)
 }
 
+// TopKRecent 返回最近榜前 K 项
 func (s *Store) TopKRecent(k int) []RankItem {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.recent.TopK(k)
 }
 
+// AddOrUpdateDoc 新增或更新文档
 func (s *Store) AddOrUpdateDoc(doc Doc) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -119,34 +119,39 @@ func (s *Store) AddOrUpdateDoc(doc Doc) error {
 		s.bkt.Add(doc.ID)
 	}
 	s.docs.Upsert(doc)
-	s.maybeBroadcastTopKLocked()
+	// 广播文档更新
+	s.sse.BroadcastUpdateDoc()
 	return nil
 }
 
+// DeleteDoc 删除文档
 func (s *Store) DeleteDoc(id string) error {
-    s.mu.Lock()
-    defer s.mu.Unlock()
-    if _, ok := s.docs.Get(id); !ok {
-        return nil
-    }
-    if err := s.p.AppendWAL(walEntry{Op: "DEL", ID: id}); err != nil {
-        return err
-    }
-    s.docs.Delete(id)
-    s.bkt.Delete(id)
-    // 让最近榜即时移除（不会去改 ring；后续过期时发现不存在也无副作用）
-    s.recent.bkt.Delete(id)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.docs.Get(id); !ok {
+		return nil
+	}
+	if err := s.p.AppendWAL(walEntry{Op: "DEL", ID: id}); err != nil {
+		return err
+	}
+	s.docs.Delete(id)
+	s.bkt.Delete(id)
+	// 立即从最近榜移除 id
+	s.recent.bkt.Delete(id)
 
-    s.maybeBroadcastTopKLocked()
-    return nil
+	// 广播文档更新
+	s.sse.BroadcastUpdateDoc()
+	return nil
 }
 
+// ListDocs 返回全部文档
 func (s *Store) ListDocs() []Doc {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.docs.List()
 }
 
+// CountsSnapshot 返回总榜计数快照
 func (s *Store) CountsSnapshot() map[string]int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -157,19 +162,19 @@ func (s *Store) CountsSnapshot() map[string]int {
 	return out
 }
 
-// 替换原有 maybeBroadcastTopKLocked 实现
+// maybeBroadcastTopKLocked 节流后广播点击更新
 func (s *Store) maybeBroadcastTopKLocked() {
 	now := time.Now()
-	// 节流：100ms 内最多推送一次“update”
+	// 100 ms 内最多一次
 	if now.Sub(s.lastPush) < 100*time.Millisecond {
 		return
 	}
 	s.lastPush = now
-	// 只发送“数据有更新”的锚点
-	s.sse.BroadcastUpdate()
+	// 广播点击更新
+	s.sse.BroadcastUpdateClick()
 }
 
-// StartRecentAdvancer 启动一个每秒推进 recent 窗口的 goroutine
+// StartRecentAdvancer 启动定时推进最近窗口
 func (s *Store) StartRecentAdvancer(stop <-chan struct{}) {
 	ticker := time.NewTicker(1 * time.Second)
 	go func() {
@@ -180,7 +185,7 @@ func (s *Store) StartRecentAdvancer(stop <-chan struct{}) {
 				sec := time.Now().Unix()
 				s.mu.Lock()
 				changed := s.recent.advanceTo(sec)
-				// 仅在窗口推进导致 recent 榜变动时再广播
+				// 仅在排行榜变动时广播
 				if changed {
 					s.maybeBroadcastTopKLocked()
 				}

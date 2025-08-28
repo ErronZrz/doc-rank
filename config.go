@@ -35,6 +35,7 @@ func mustParseDuration(s string, def time.Duration) time.Duration {
 	return def
 }
 
+// LoadConfig 加载配置
 func LoadConfig() Config {
 	return Config{
 		Port:              getenv("PORT", "8080"),
